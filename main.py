@@ -5,7 +5,7 @@ import base64
 import json
 import requests
 from fastapi import FastAPI, Request, HTTPException
-import google.generativeai as genai
+from google import genai
 
 app = FastAPI()
 
@@ -57,10 +57,10 @@ def reply_message(reply_token: str, text: str):
 
 # ── Gemini 回覆 ────────────────────────────────────────────────
 def ask_gemini(user_message: str) -> str:
-    genai.configure(api_key=GEMINI_KEY)
-    model = genai.GenerativeModel("gemini-1.5-pro")
-    response = model.generate_content(
-        f"{RESTAURANT_INFO}\n\n顧客說：{user_message}"
+    client = genai.Client(api_key=GEMINI_KEY)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=f"{RESTAURANT_INFO}\n\n顧客說：{user_message}"
     )
     return response.text.strip()
 
