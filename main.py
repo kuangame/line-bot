@@ -5,14 +5,13 @@ import base64
 import json
 import requests
 from fastapi import FastAPI, Request, HTTPException
-from google import genai
 
 app = FastAPI()
 
 # ── 設定 ──────────────────────────────────────────────────────
 LINE_SECRET = os.environ.get("LINE_SECRET", "")
 LINE_TOKEN = os.environ.get("LINE_TOKEN", "")
-GEMINI_KEY = os.environ.get("GEMINI_KEY", "")
+MINIMAX_KEY = os.environ.get("MINIMAX_KEY", "")
 
 # 餐廳資料（之後補上）
 RESTAURANT_INFO = """
@@ -56,13 +55,23 @@ def reply_message(reply_token: str, text: str):
     )
 
 # ── Gemini 回覆 ────────────────────────────────────────────────
-def ask_gemini(user_message: str) -> str:
-    client = genai.Client(api_key=GEMINI_KEY)
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=f"{RESTAURANT_INFO}\n\n顧客說：{user_message}"
+def ask_minimax(user_message: str) -> str:
+    response = requests.post(
+        "https://api.minimax.io/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {MINIMAX_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "MiniMax-Text-01",
+            "messages": [
+                {"role": "system", "content": RESTAURANT_INFO},
+                {"role": "user", "content": user_message},
+            ],
+        },
+        timeout=30,
     )
-    return response.text.strip()
+    return response.json()["choices"][0]["message"]["content"].strip()
 
 # ── Webhook ────────────────────────────────────────────────────
 @app.post("/webhook")
@@ -79,7 +88,7 @@ async def webhook(request: Request):
         if event["type"] == "message" and event["message"]["type"] == "text":
             user_msg = event["message"]["text"]
             reply_token = event["replyToken"]
-            reply = ask_gemini(user_msg)
+            reply = ask_minimax(user_msg)
             reply_message(reply_token, reply)
 
     return {"status": "ok"}
