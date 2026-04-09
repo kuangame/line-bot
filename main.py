@@ -57,7 +57,7 @@ def reply_message(reply_token: str, text: str):
 # ── MiniMax 回覆 ────────────────────────────────────────────────
 def ask_minimax(user_message: str) -> str:
     response = requests.post(
-        "https://api.minimax.io/v1/chat/completions",
+        "https://api.minimax.io/v1/text/chatcompletion_v2",
         headers={
             "Authorization": f"Bearer {MINIMAX_KEY}",
             "Content-Type": "application/json",
