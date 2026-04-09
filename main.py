@@ -76,7 +76,11 @@ def ask_minimax(user_message: str) -> str:
 
     # 標準 OpenAI 格式（choices 不為 None）
     if data.get("choices"):
-        return data["choices"][0]["message"]["content"].strip()
+        content = data["choices"][0]["message"]["content"].strip()
+        # 移除 <think>...</think> 思考過程
+        import re
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        return content
 
     # MiniMax 自有格式（reply 欄位）
     if data.get("reply"):
