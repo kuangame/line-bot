@@ -57,7 +57,7 @@ def reply_message(reply_token: str, text: str):
 # ── MiniMax 回覆 ────────────────────────────────────────────────
 def ask_minimax(user_message: str) -> str:
     response = requests.post(
-        "https://api.minimax.io/v1/text/chatcompletion_v2",
+        "https://api.minimax.io/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {MINIMAX_KEY}",
             "Content-Type": "application/json",
@@ -74,16 +74,16 @@ def ask_minimax(user_message: str) -> str:
     data = response.json()
     print("MiniMax response:", data)  # 除錯用，確認回傳格式
 
-    # 嘗試標準 OpenAI 格式
-    if "choices" in data:
+    # 標準 OpenAI 格式（choices 不為 None）
+    if data.get("choices"):
         return data["choices"][0]["message"]["content"].strip()
 
-    # MiniMax 自有格式（reply / base_resp）
-    if "reply" in data:
+    # MiniMax 自有格式（reply 欄位）
+    if data.get("reply"):
         return data["reply"].strip()
 
     # 回傳錯誤訊息給顧客
-    error_msg = data.get("base_resp", {}).get("status_msg", str(data))
+    error_msg = data.get("base_resp", {}).get("status_msg") or data.get("error", {}).get("message", str(data))
     print("MiniMax error:", error_msg)
     return "抱歉，系統暫時無法回應，請稍後再試。"
 
