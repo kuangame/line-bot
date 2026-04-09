@@ -54,7 +54,7 @@ def reply_message(reply_token: str, text: str):
         },
     )
 
-# ── Gemini 回覆 ────────────────────────────────────────────────
+# ── MiniMax 回覆 ────────────────────────────────────────────────
 def ask_minimax(user_message: str) -> str:
     response = requests.post(
         "https://api.minimax.io/v1/chat/completions",
@@ -71,7 +71,21 @@ def ask_minimax(user_message: str) -> str:
         },
         timeout=30,
     )
-    return response.json()["choices"][0]["message"]["content"].strip()
+    data = response.json()
+    print("MiniMax response:", data)  # 除錯用，確認回傳格式
+
+    # 嘗試標準 OpenAI 格式
+    if "choices" in data:
+        return data["choices"][0]["message"]["content"].strip()
+
+    # MiniMax 自有格式（reply / base_resp）
+    if "reply" in data:
+        return data["reply"].strip()
+
+    # 回傳錯誤訊息給顧客
+    error_msg = data.get("base_resp", {}).get("status_msg", str(data))
+    print("MiniMax error:", error_msg)
+    return "抱歉，系統暫時無法回應，請稍後再試。"
 
 # ── Webhook ────────────────────────────────────────────────────
 @app.post("/webhook")
