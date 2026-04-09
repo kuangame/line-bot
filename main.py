@@ -63,7 +63,7 @@ def ask_minimax(user_message: str) -> str:
             "Content-Type": "application/json",
         },
         json={
-            "model": "MiniMax-Text-01",
+            "model": "abab6.5s-chat",
             "messages": [
                 {"role": "system", "content": RESTAURANT_INFO},
                 {"role": "user", "content": user_message},
