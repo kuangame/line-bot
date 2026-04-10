@@ -5,6 +5,7 @@ import base64
 import json
 import re
 import asyncio
+import time
 import requests
 from fastapi import FastAPI, Request, HTTPException
 
@@ -15,12 +16,17 @@ LINE_SECRET = os.environ.get("LINE_SECRET", "")
 LINE_TOKEN  = os.environ.get("LINE_TOKEN", "")
 MINIMAX_KEY = os.environ.get("MINIMAX_KEY", "")
 
-BUFFER_SECONDS = 5  # 等待訊息的秒數
+BUFFER_SECONDS   = 5      # 等待訊息的秒數
+HUMAN_TIMEOUT_HR = 2      # 人工模式自動逾時（小時）
+DONE_KEYWORD     = "/done" # 真人輸入此指令解除人工模式
 
 # 訊息 buffer（key: user_id）
 _pending_messages: dict[str, list[str]] = {}
 _pending_tokens:   dict[str, str]       = {}
 _pending_tasks:    dict[str, asyncio.Task] = {}
+
+# 人工模式（key: user_id, value: 進入時間 timestamp）
+_human_mode: dict[str, float] = {}
 
 # 餐廳資料（之後補上）
 RESTAURANT_INFO = """
@@ -41,6 +47,25 @@ RESTAURANT_INFO = """
 2. 如果問題複雜（如客訴、特殊需求、無法回答），請回覆：「您好，這個問題我幫您轉交給專人處理，請稍候，我們會盡快回覆您。」
 3. 回覆簡短有禮，不要太冗長。
 """
+
+# ── 人工模式工具函數 ────────────────────────────────────────────
+def is_human_mode(user_id: str) -> bool:
+    if user_id not in _human_mode:
+        return False
+    elapsed_hr = (time.time() - _human_mode[user_id]) / 3600
+    if elapsed_hr >= HUMAN_TIMEOUT_HR:
+        _human_mode.pop(user_id, None)
+        print(f"[human_mode] {user_id} 逾時自動解除")
+        return False
+    return True
+
+def enable_human_mode(user_id: str):
+    _human_mode[user_id] = time.time()
+    print(f"[human_mode] {user_id} 進入人工模式")
+
+def disable_human_mode(user_id: str):
+    _human_mode.pop(user_id, None)
+    print(f"[human_mode] {user_id} 解除人工模式")
 
 # ── 驗證 LINE 簽名 ─────────────────────────────────────────────
 def verify_signature(body: bytes, signature: str) -> bool:
@@ -105,11 +130,21 @@ async def process_buffered(user_id: str):
     if not messages or not reply_token:
         return
 
+    # 人工模式：不回覆，讓真人處理
+    if is_human_mode(user_id):
+        print(f"[human_mode] {user_id} 人工模式中，略過 AI 回覆")
+        return
+
     combined = "\n".join(messages)
     print(f"[buffer] user={user_id} messages={messages}")
 
-    # 用 thread 執行同步的 requests 呼叫，避免阻塞 event loop
     reply = await asyncio.to_thread(ask_minimax, combined)
+
+    # AI 判斷需要轉人工 → 啟動人工模式
+    HANDOFF_PHRASES = ["幫您轉交給專人", "轉交給專人處理"]
+    if any(phrase in reply for phrase in HANDOFF_PHRASES):
+        enable_human_mode(user_id)
+
     await asyncio.to_thread(reply_message, reply_token, reply)
 
 # ── Webhook ────────────────────────────────────────────────────
@@ -130,6 +165,12 @@ async def webhook(request: Request):
         user_id     = event["source"]["userId"]
         user_msg    = event["message"]["text"]
         reply_token = event["replyToken"]
+
+        # 真人輸入 /done → 解除人工模式（不累積進 buffer）
+        if user_msg.strip() == DONE_KEYWORD:
+            disable_human_mode(user_id)
+            await asyncio.to_thread(reply_message, reply_token, "已恢復 AI 自動回覆。")
+            continue
 
         # 累積訊息，保留最新的 reply_token
         _pending_messages.setdefault(user_id, []).append(user_msg)
