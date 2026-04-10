@@ -3,6 +3,8 @@ import hmac
 import hashlib
 import base64
 import json
+import re
+import asyncio
 import requests
 from fastapi import FastAPI, Request, HTTPException
 
@@ -10,8 +12,15 @@ app = FastAPI()
 
 # ── 設定 ──────────────────────────────────────────────────────
 LINE_SECRET = os.environ.get("LINE_SECRET", "")
-LINE_TOKEN = os.environ.get("LINE_TOKEN", "")
+LINE_TOKEN  = os.environ.get("LINE_TOKEN", "")
 MINIMAX_KEY = os.environ.get("MINIMAX_KEY", "")
+
+BUFFER_SECONDS = 5  # 等待訊息的秒數
+
+# 訊息 buffer（key: user_id）
+_pending_messages: dict[str, list[str]] = {}
+_pending_tokens:   dict[str, str]       = {}
+_pending_tasks:    dict[str, asyncio.Task] = {}
 
 # 餐廳資料（之後補上）
 RESTAURANT_INFO = """
@@ -71,24 +80,37 @@ def ask_minimax(user_message: str) -> str:
         timeout=30,
     )
     data = response.json()
-    print("MiniMax response:", data)  # 除錯用，確認回傳格式
+    print("MiniMax response:", data)
 
-    # 標準 OpenAI 格式（choices 不為 None）
     if data.get("choices"):
         content = data["choices"][0]["message"]["content"].strip()
-        # 移除 <think>...</think> 思考過程
-        import re
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         return content
 
-    # MiniMax 自有格式（reply 欄位）
     if data.get("reply"):
         return data["reply"].strip()
 
-    # 回傳錯誤訊息給顧客
     error_msg = data.get("base_resp", {}).get("status_msg") or data.get("error", {}).get("message", str(data))
     print("MiniMax error:", error_msg)
     return "抱歉，系統暫時無法回應，請稍後再試。"
+
+# ── 等待後合併訊息並回覆 ────────────────────────────────────────
+async def process_buffered(user_id: str):
+    await asyncio.sleep(BUFFER_SECONDS)
+
+    messages    = _pending_messages.pop(user_id, [])
+    reply_token = _pending_tokens.pop(user_id, None)
+    _pending_tasks.pop(user_id, None)
+
+    if not messages or not reply_token:
+        return
+
+    combined = "\n".join(messages)
+    print(f"[buffer] user={user_id} messages={messages}")
+
+    # 用 thread 執行同步的 requests 呼叫，避免阻塞 event loop
+    reply = await asyncio.to_thread(ask_minimax, combined)
+    await asyncio.to_thread(reply_message, reply_token, reply)
 
 # ── Webhook ────────────────────────────────────────────────────
 @app.post("/webhook")
@@ -102,11 +124,23 @@ async def webhook(request: Request):
 
     events = json.loads(body)["events"]
     for event in events:
-        if event["type"] == "message" and event["message"]["type"] == "text":
-            user_msg = event["message"]["text"]
-            reply_token = event["replyToken"]
-            reply = ask_minimax(user_msg)
-            reply_message(reply_token, reply)
+        if event["type"] != "message" or event["message"]["type"] != "text":
+            continue
+
+        user_id     = event["source"]["userId"]
+        user_msg    = event["message"]["text"]
+        reply_token = event["replyToken"]
+
+        # 累積訊息，保留最新的 reply_token
+        _pending_messages.setdefault(user_id, []).append(user_msg)
+        _pending_tokens[user_id] = reply_token
+
+        # 取消舊 task，重新計時
+        if user_id in _pending_tasks:
+            _pending_tasks[user_id].cancel()
+
+        task = asyncio.create_task(process_buffered(user_id))
+        _pending_tasks[user_id] = task
 
     return {"status": "ok"}
 
