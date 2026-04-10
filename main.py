@@ -163,7 +163,15 @@ async def process_buffered(user_id: str):
     combined = "\n".join(messages)
     print(f"[buffer] user={user_id} messages={messages}")
 
-    reply = await asyncio.to_thread(ask_minimax, combined)
+    try:
+        reply = await asyncio.to_thread(ask_minimax, combined)
+    except Exception as e:
+        print(f"[error] ask_minimax 失敗：{e}")
+        await asyncio.to_thread(
+            reply_message, reply_token,
+            "抱歉，系統目前忙碌中，請稍後再試，或直接來電 05-2398979。"
+        )
+        return
 
     # AI 判斷需要轉人工 → 啟動人工模式
     HANDOFF_PHRASES = ["幫您轉交給專人", "轉交給專人處理"]
