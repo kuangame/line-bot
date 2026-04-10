@@ -6,6 +6,7 @@ import json
 import re
 import asyncio
 import time
+from collections import deque
 import requests
 from fastapi import FastAPI, Request, HTTPException
 
@@ -20,6 +21,9 @@ BUFFER_SECONDS   = 5      # 等待訊息的秒數
 HUMAN_TIMEOUT_HR = 2      # 人工模式自動逾時（小時）
 DONE_KEYWORD     = "/done" # 真人輸入此指令解除人工模式
 
+RATE_LIMIT_COUNT  = 10    # 時間窗內最多幾條
+RATE_LIMIT_WINDOW = 60    # 時間窗（秒）
+
 # 訊息 buffer（key: user_id）
 _pending_messages: dict[str, list[str]] = {}
 _pending_tokens:   dict[str, str]       = {}
@@ -27,6 +31,11 @@ _pending_tasks:    dict[str, asyncio.Task] = {}
 
 # 人工模式（key: user_id, value: 進入時間 timestamp）
 _human_mode: dict[str, float] = {}
+
+# Rate limit（key: user_id, value: 訊息時間戳 deque）
+_rate_timestamps: dict[str, deque] = {}
+# 已發送過警告的用戶（避免重複警告）
+_rate_warned: set[str] = set()
 
 # 餐廳資料（之後補上）
 RESTAURANT_INFO = """
@@ -66,6 +75,22 @@ def enable_human_mode(user_id: str):
 def disable_human_mode(user_id: str):
     _human_mode.pop(user_id, None)
     print(f"[human_mode] {user_id} 解除人工模式")
+
+# ── Rate limit 工具函數 ─────────────────────────────────────────
+def is_rate_limited(user_id: str) -> bool:
+    now = time.time()
+    q = _rate_timestamps.setdefault(user_id, deque())
+
+    # 移除時間窗外的舊紀錄
+    while q and now - q[0] > RATE_LIMIT_WINDOW:
+        q.popleft()
+
+    if len(q) >= RATE_LIMIT_COUNT:
+        return True
+
+    q.append(now)
+    _rate_warned.discard(user_id)  # 進入新時間窗，重置警告狀態
+    return False
 
 # ── 驗證 LINE 簽名 ─────────────────────────────────────────────
 def verify_signature(body: bytes, signature: str) -> bool:
@@ -165,6 +190,16 @@ async def webhook(request: Request):
         user_id     = event["source"]["userId"]
         user_msg    = event["message"]["text"]
         reply_token = event["replyToken"]
+
+        # Rate limit 檢查
+        if is_rate_limited(user_id):
+            if user_id not in _rate_warned:
+                _rate_warned.add(user_id)
+                await asyncio.to_thread(
+                    reply_message, reply_token,
+                    "您傳送訊息的速度太快，請稍後再試。"
+                )
+            continue
 
         # 真人輸入 /done → 解除人工模式（不累積進 buffer）
         if user_msg.strip() == DONE_KEYWORD:
