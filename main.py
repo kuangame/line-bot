@@ -13,9 +13,10 @@ from fastapi import FastAPI, Request, HTTPException
 app = FastAPI()
 
 # ── 設定 ──────────────────────────────────────────────────────
-LINE_SECRET = os.environ.get("LINE_SECRET", "")
-LINE_TOKEN  = os.environ.get("LINE_TOKEN", "")
-MINIMAX_KEY = os.environ.get("MINIMAX_KEY", "")
+LINE_SECRET   = os.environ.get("LINE_SECRET", "")
+LINE_TOKEN    = os.environ.get("LINE_TOKEN", "")
+MINIMAX_KEY   = os.environ.get("MINIMAX_KEY", "")
+ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")  # 管理員 LINE User ID，收轉人工通知
 
 BUFFER_SECONDS   = 5      # 等待訊息的秒數
 HUMAN_TIMEOUT_HR = 2      # 人工模式自動逾時（小時）
@@ -137,18 +138,21 @@ def verify_signature(body: bytes, signature: str) -> bool:
     expected = base64.b64encode(hash).decode()
     return hmac.compare_digest(expected, signature)
 
-# ── 回覆 LINE 訊息 ─────────────────────────────────────────────
+# ── LINE 訊息發送 ───────────────────────────────────────────────
 def reply_message(reply_token: str, text: str):
     requests.post(
         "https://api.line.me/v2/bot/message/reply",
-        headers={
-            "Authorization": f"Bearer {LINE_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "replyToken": reply_token,
-            "messages": [{"type": "text", "text": text}],
-        },
+        headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+        json={"replyToken": reply_token, "messages": [{"type": "text", "text": text}]},
+        timeout=10,
+    )
+
+def push_message(user_id: str, text: str):
+    requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+        json={"to": user_id, "messages": [{"type": "text", "text": text}]},
+        timeout=10,
     )
 
 # ── MiniMax 回覆 ────────────────────────────────────────────────
@@ -212,10 +216,12 @@ async def process_buffered(user_id: str):
         )
         return
 
-    # AI 判斷需要轉人工 → 啟動人工模式
+    # AI 判斷需要轉人工 → 啟動人工模式，通知管理員
     HANDOFF_PHRASES = ["幫您轉交給專人", "轉交給專人處理"]
     if any(phrase in reply for phrase in HANDOFF_PHRASES):
         enable_human_mode(user_id)
+        if ADMIN_USER_ID:
+            push_message(ADMIN_USER_ID, f"⚠️ 顧客需要真人處理\nUser ID: {user_id}\n\n傳送 /done 給顧客可解除接管（或 2 小時自動解除）")
 
     await asyncio.to_thread(reply_message, reply_token, reply)
 
@@ -225,9 +231,8 @@ async def webhook(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
 
-    # TODO: 上線後開回簽名驗證
-    # if not verify_signature(body, signature):
-    #     raise HTTPException(status_code=400, detail="Invalid signature")
+    if not verify_signature(body, signature):
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
     events = json.loads(body)["events"]
     for event in events:
