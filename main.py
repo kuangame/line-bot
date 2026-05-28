@@ -1,153 +1,185 @@
 import os
+import re
 import hmac
 import hashlib
 import base64
 import json
-import re
 import asyncio
 import time
-from collections import deque
 import requests
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse
+from collections import deque
 
 app = FastAPI()
 
-# ── 設定 ──────────────────────────────────────────────────────
-LINE_SECRET   = os.environ.get("LINE_SECRET", "")
-LINE_TOKEN    = os.environ.get("LINE_TOKEN", "")
-MINIMAX_KEY   = os.environ.get("MINIMAX_KEY", "")
-ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")  # 管理員 LINE User ID，收轉人工通知
+# ── 環境設定 ────────────────────────────────────────────────────
+LINE_SECRET    = os.environ.get("LINE_SECRET", "")
+LINE_TOKEN     = os.environ.get("LINE_TOKEN", "")
+MINIMAX_KEY    = os.environ.get("MINIMAX_KEY", "")
+ADMIN_USER_ID  = os.environ.get("ADMIN_USER_ID", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO    = "kuangame/line-bot"
+GITHUB_BRANCH  = "main"
 
-BUFFER_SECONDS   = 5      # 等待訊息的秒數
-HUMAN_TIMEOUT_HR = 2      # 人工模式自動逾時（小時）
-DONE_KEYWORD     = "/done" # 真人輸入此指令解除人工模式
+BUFFER_SECONDS    = 5
+HUMAN_TIMEOUT_HR  = 2
+DONE_KEYWORD      = "/done"
+RATE_LIMIT_COUNT  = 10
+RATE_LIMIT_WINDOW = 60
 
-RATE_LIMIT_COUNT  = 10    # 時間窗內最多幾條
-RATE_LIMIT_WINDOW = 60    # 時間窗（秒）
-
-# 訊息 buffer（key: user_id）
+# ── 狀態儲存（in-memory） ────────────────────────────────────────
 _pending_messages: dict[str, list[str]] = {}
 _pending_tokens:   dict[str, str]       = {}
 _pending_tasks:    dict[str, asyncio.Task] = {}
+_human_mode:       dict[str, float]     = {}
+_rate_timestamps:  dict[str, deque]     = {}
+_rate_warned:      set[str]             = set()
 
-# 人工模式（key: user_id, value: 進入時間 timestamp）
-_human_mode: dict[str, float] = {}
+# ── Config ───────────────────────────────────────────────────────
+_config: dict = {"restaurant_info": "", "keyword_replies": []}
+_config_sha: str = ""
 
-# Rate limit（key: user_id, value: 訊息時間戳 deque）
-_rate_timestamps: dict[str, deque] = {}
-# 已發送過警告的用戶（避免重複警告）
-_rate_warned: set[str] = set()
+def _gh_headers() -> dict:
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
 
-# 餐廳資料
-RESTAURANT_INFO = """
-你是新象園婚宴會館的 LINE 客服助理，請用繁體中文回覆顧客，語氣親切有禮，回覆簡短不冗長。
+def load_config():
+    global _config, _config_sha
+    if not GITHUB_TOKEN:
+        print("[config] 未設定 GITHUB_TOKEN，跳過 GitHub 載入")
+        return
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
+            headers=_gh_headers(), timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            _config_sha = data["sha"]
+            _config = json.loads(base64.b64decode(data["content"]).decode())
+            print(f"[config] 載入成功，{len(_config.get('keyword_replies', []))} 個關鍵字規則")
+        elif r.status_code == 404:
+            _push_config("init: create config.json")
+        else:
+            print(f"[config] 載入失敗：{r.status_code}")
+    except Exception as e:
+        print(f"[config] 載入失敗：{e}")
 
-## 基本資料
-- 餐廳名稱：新象園婚宴會館
-- 電話：05-2398979
-- 地址：嘉義縣中埔鄉和睦村司公廍3-19號
-- 營業時間：平日及假日均為 11:00~14:00、16:00~21:00
-- 4月公休日：4/7、4/29（若遇公休日則隔日依序回覆）
+def _push_config(message: str) -> bool:
+    global _config_sha
+    try:
+        content = base64.b64encode(
+            json.dumps(_config, ensure_ascii=False, indent=2).encode()
+        ).decode()
+        body: dict = {
+            "message": message,
+            "content": content,
+            "branch": GITHUB_BRANCH,
+        }
+        if _config_sha:
+            body["sha"] = _config_sha
+        r = requests.put(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
+            headers=_gh_headers(), json=body, timeout=15,
+        )
+        if r.status_code in (200, 201):
+            _config_sha = r.json()["content"]["sha"]
+            print("[config] 已推送到 GitHub")
+            return True
+        print(f"[config] 推送失敗：{r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[config] 推送失敗：{e}")
+    return False
 
-## 菜單與價格
-- 桌菜方案：3000／3500／4000／5000／6000／8000／10000（需加一成服務費）
-- 素食選項：套餐或合菜
-- 飲料：大部分 60 元，可提供酒水單參考
+def upload_image_to_github(filename: str, content: bytes) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+    path = f"images/{safe}"
+    sha = None
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}",
+            headers=_gh_headers(), timeout=10,
+        )
+        if r.status_code == 200:
+            sha = r.json()["sha"]
+    except Exception:
+        pass
+    body: dict = {
+        "message": f"upload image: {safe}",
+        "content": base64.b64encode(content).decode(),
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        body["sha"] = sha
+    r = requests.put(
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}",
+        headers=_gh_headers(), json=body, timeout=30,
+    )
+    if r.status_code in (200, 201):
+        return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{path}"
+    raise Exception(f"圖片上傳失敗：{r.status_code}")
 
-## 訂位方式
-- 電話訂位：05-2398979
-- 線上訂位：請留下姓名與聯絡電話；若為遊覽車或旅行社，請留下車名／旅行社名及領隊電話（領隊未定請留旅行社電話）
+# ── Startup ───────────────────────────────────────────────────────
+@app.on_event("startup")
+async def on_startup():
+    load_config()
 
-## 喜宴場地
-- 可容納桌數：38 桌
-- 停車場：多（免費）
-- 無障礙設施：有
-- 包廂：
-  - 大象廳：20 人桌，低消 5000
-  - 小象廳：12 人桌 × 2 桌，低消 5000
-  - 龍鳳廳：15 人 1 桌，低消 5000
-- 若需舞台且桌數 15 桌以下，酌收場地費 28000；無需舞台則無此限
+# ── Admin auth ────────────────────────────────────────────────────
+def require_auth(request: Request):
+    pw = request.headers.get("X-Admin-Password", "")
+    if not ADMIN_PASSWORD or pw != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-## 常見問題
-- 可以自帶蛋糕嗎？→ 可以
-- 有提供喜帖嗎？→ 沒有，但有提供禮金簿
-- 可以場地布置嗎？→ 可以
-- 有香檳塔嗎？需加價嗎？→ 有，不需加價
-- 文定儀式場地需另外嗎？→ 通常在舞台前，需告知人數，無需加價
-- 旅行社標案需提供公司資料嗎？→ 是的，請提供
-- 發票怎麼開？→ 旅行社發票需外加 5% 稅金，為手開發票
-- 有無開瓶費？→ 若攜帶與酒水單重複品項，每桌酌收 500 元
-- 可以試菜嗎？→ 可以；喜宴試菜 85 折，團體試菜無折扣
-- 生日優惠？→ 每桌 5000 以上招待豬腳麵線（每桌一份，需提早預約）
-- 可以帶寵物嗎？→ 可以；喜宴時請幫毛孩穿尿布或用推車，以免隨地便溺
-- 可以刷卡嗎？→ 團體及喜宴僅收現金
-- 如何匯訂？→ 喜宴訂金 20000 元；下訂後若需改期請聯繫人員；婚禮前 3 個月簽訂宴會資訊，桌數及細節於宴客前 2 週告知即可
-- 婚禮有什麼方案？→ 早鳥優惠：下訂 2027 年婚期，免收一成服務費
-
-## 關鍵字優先回覆
-遇到以下關鍵字，請優先照此回答：
-- 訂位／我要訂位／想訂位 → 「您好！訂位請來電 05-2398979，或留下您的姓名與聯絡電話，我們將盡快與您確認。」
-- 地址／在哪／怎麼去 → 「我們位於嘉義縣中埔鄉和睦村司公廍3-19號，歡迎來訪！」
-- 營業時間／幾點開 → 「我們平日及假日均為 11:00~14:00、16:00~21:00。」
-- 電話／聯絡 → 「請來電 05-2398979，我們很樂意為您服務！」
-
----
-回覆規則：
-1. 問題在上述資料範圍內，直接簡短回答。
-2. 問題複雜、有客訴或無法回答，請回覆：「您好，這個問題我幫您轉交給專人處理，請稍候，我們會盡快回覆您。」
-"""
-
-# ── 人工模式工具函數 ────────────────────────────────────────────
+# ── 人工模式 ──────────────────────────────────────────────────────
 def is_human_mode(user_id: str) -> bool:
     if user_id not in _human_mode:
         return False
-    elapsed_hr = (time.time() - _human_mode[user_id]) / 3600
-    if elapsed_hr >= HUMAN_TIMEOUT_HR:
-        _human_mode.pop(user_id, None)
-        print(f"[human_mode] {user_id} 逾時自動解除")
+    if (time.time() - _human_mode[user_id]) / 3600 >= HUMAN_TIMEOUT_HR:
+        _human_mode.pop(user_id)
         return False
     return True
 
 def enable_human_mode(user_id: str):
     _human_mode[user_id] = time.time()
-    print(f"[human_mode] {user_id} 進入人工模式")
+    print(f"[human] {user_id} 進入人工模式")
 
 def disable_human_mode(user_id: str):
     _human_mode.pop(user_id, None)
-    print(f"[human_mode] {user_id} 解除人工模式")
+    print(f"[human] {user_id} 解除人工模式")
 
-# ── Rate limit 工具函數 ─────────────────────────────────────────
+# ── Rate limit ────────────────────────────────────────────────────
 def is_rate_limited(user_id: str) -> bool:
     now = time.time()
     q = _rate_timestamps.setdefault(user_id, deque())
-
-    # 移除時間窗外的舊紀錄
     while q and now - q[0] > RATE_LIMIT_WINDOW:
         q.popleft()
-
     if len(q) >= RATE_LIMIT_COUNT:
         return True
-
     q.append(now)
-    _rate_warned.discard(user_id)  # 進入新時間窗，重置警告狀態
+    _rate_warned.discard(user_id)
     return False
 
-# ── 驗證 LINE 簽名 ─────────────────────────────────────────────
+# ── LINE 工具 ─────────────────────────────────────────────────────
 def verify_signature(body: bytes, signature: str) -> bool:
-    hash = hmac.new(LINE_SECRET.encode(), body, hashlib.sha256).digest()
-    expected = base64.b64encode(hash).decode()
-    return hmac.compare_digest(expected, signature)
+    mac = hmac.new(LINE_SECRET.encode(), body, hashlib.sha256).digest()
+    return hmac.compare_digest(base64.b64encode(mac).decode(), signature)
 
-# ── LINE 訊息發送 ───────────────────────────────────────────────
-def reply_message(reply_token: str, text: str):
+def reply_messages(reply_token: str, messages: list):
     requests.post(
         "https://api.line.me/v2/bot/message/reply",
         headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-        json={"replyToken": reply_token, "messages": [{"type": "text", "text": text}]},
+        json={"replyToken": reply_token, "messages": messages[:5]},
         timeout=10,
     )
 
-def push_message(user_id: str, text: str):
+def reply_text(reply_token: str, text: str):
+    reply_messages(reply_token, [{"type": "text", "text": text}])
+
+def push_text(user_id: str, text: str):
     requests.post(
         "https://api.line.me/v2/bot/message/push",
         headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
@@ -155,41 +187,57 @@ def push_message(user_id: str, text: str):
         timeout=10,
     )
 
-# ── MiniMax 回覆 ────────────────────────────────────────────────
+# ── 關鍵字比對 ────────────────────────────────────────────────────
+def find_keyword_rule(user_msg: str) -> dict | None:
+    msg_lower = user_msg.lower()
+    for rule in _config.get("keyword_replies", []):
+        for kw in rule.get("keywords", []):
+            if kw.lower() in msg_lower:
+                return rule
+    return None
+
+def build_line_messages(rule: dict) -> list:
+    msgs = []
+    msg_type = rule.get("message_type", "text")
+    if msg_type in ("text", "both") and rule.get("text"):
+        msgs.append({"type": "text", "text": rule["text"]})
+    if msg_type in ("image", "both") and rule.get("image_url"):
+        url = rule["image_url"]
+        msgs.append({"type": "image", "originalContentUrl": url, "previewImageUrl": url})
+    return msgs
+
+# ── MiniMax ───────────────────────────────────────────────────────
 def ask_minimax(user_message: str) -> str:
-    response = requests.post(
-        "https://api.minimax.io/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {MINIMAX_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "MiniMax-M2.7",
-            "messages": [
-                {"role": "system", "content": RESTAURANT_INFO},
-                {"role": "user", "content": user_message},
-            ],
-        },
-        timeout=30,
-    )
-    data = response.json()
-    print("MiniMax response:", data)
+    try:
+        r = requests.post(
+            "https://api.minimax.io/v1/chat/completions",
+            headers={"Authorization": f"Bearer {MINIMAX_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "MiniMax-M2.7",
+                "messages": [
+                    {"role": "system", "content": _config.get("restaurant_info", "")},
+                    {"role": "user", "content": user_message},
+                ],
+            },
+            timeout=30,
+        )
+        data = r.json()
+        if data.get("choices"):
+            content = data["choices"][0]["message"]["content"].strip()
+            return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        if data.get("reply"):
+            return data["reply"].strip()
+        print("[minimax] error:", data)
+    except Exception as e:
+        print("[minimax] exception:", e)
+    return "抱歉，系統暫時無法回應，請稍後再試，或直接來電 05-2398979。"
 
-    if data.get("choices"):
-        content = data["choices"][0]["message"]["content"].strip()
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-        return content
-
-    if data.get("reply"):
-        return data["reply"].strip()
-
-    error_msg = data.get("base_resp", {}).get("status_msg") or data.get("error", {}).get("message", str(data))
-    print("MiniMax error:", error_msg)
-    return "抱歉，系統暫時無法回應，請稍後再試。"
-
-# ── 等待後合併訊息並回覆 ────────────────────────────────────────
+# ── Buffer ────────────────────────────────────────────────────────
 async def process_buffered(user_id: str):
-    await asyncio.sleep(BUFFER_SECONDS)
+    try:
+        await asyncio.sleep(BUFFER_SECONDS)
+    except asyncio.CancelledError:
+        return
 
     messages    = _pending_messages.pop(user_id, [])
     reply_token = _pending_tokens.pop(user_id, None)
@@ -197,35 +245,42 @@ async def process_buffered(user_id: str):
 
     if not messages or not reply_token:
         return
-
-    # 人工模式：不回覆，讓真人處理
     if is_human_mode(user_id):
-        print(f"[human_mode] {user_id} 人工模式中，略過 AI 回覆")
         return
 
     combined = "\n".join(messages)
-    print(f"[buffer] user={user_id} messages={messages}")
 
+    # 關鍵字優先
+    rule = find_keyword_rule(combined)
+    if rule:
+        line_msgs = build_line_messages(rule)
+        if line_msgs:
+            await asyncio.to_thread(reply_messages, reply_token, line_msgs)
+            return
+
+    # MiniMax
     try:
         reply = await asyncio.to_thread(ask_minimax, combined)
     except Exception as e:
-        print(f"[error] ask_minimax 失敗：{e}")
+        print(f"[error] {e}")
         await asyncio.to_thread(
-            reply_message, reply_token,
-            "抱歉，系統目前忙碌中，請稍後再試，或直接來電 05-2398979。"
+            reply_text, reply_token,
+            "抱歉，系統暫時無法回應，請稍後再試，或直接來電 05-2398979。"
         )
         return
 
-    # AI 判斷需要轉人工 → 啟動人工模式，通知管理員
     HANDOFF_PHRASES = ["幫您轉交給專人", "轉交給專人處理"]
-    if any(phrase in reply for phrase in HANDOFF_PHRASES):
+    if any(p in reply for p in HANDOFF_PHRASES):
         enable_human_mode(user_id)
         if ADMIN_USER_ID:
-            push_message(ADMIN_USER_ID, f"⚠️ 顧客需要真人處理\nUser ID: {user_id}\n\n傳送 /done 給顧客可解除接管（或 2 小時自動解除）")
+            asyncio.create_task(asyncio.to_thread(
+                push_text, ADMIN_USER_ID,
+                f"⚠️ 顧客需要真人處理\nUser ID: {user_id}\n\n對顧客傳 /done 可解除接管（2小時自動解除）"
+            ))
 
-    await asyncio.to_thread(reply_message, reply_token, reply)
+    await asyncio.to_thread(reply_text, reply_token, reply)
 
-# ── Webhook ────────────────────────────────────────────────────
+# ── Webhook ───────────────────────────────────────────────────────
 @app.post("/webhook")
 async def webhook(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
@@ -234,44 +289,371 @@ async def webhook(request: Request):
     if not verify_signature(body, signature):
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    events = json.loads(body)["events"]
+    events = json.loads(body).get("events", [])
     for event in events:
         if event["type"] != "message" or event["message"]["type"] != "text":
             continue
 
         user_id     = event["source"]["userId"]
-        user_msg    = event["message"]["text"]
+        user_msg    = event["message"]["text"].strip()
         reply_token = event["replyToken"]
 
-        # Rate limit 檢查
         if is_rate_limited(user_id):
             if user_id not in _rate_warned:
                 _rate_warned.add(user_id)
-                await asyncio.to_thread(
-                    reply_message, reply_token,
-                    "您傳送訊息的速度太快，請稍後再試。"
-                )
+                await asyncio.to_thread(reply_text, reply_token, "您傳送訊息的速度太快，請稍後再試。")
             continue
 
-        # 真人輸入 /done → 解除人工模式（不累積進 buffer）
-        if user_msg.strip() == DONE_KEYWORD:
+        if user_msg == DONE_KEYWORD:
             disable_human_mode(user_id)
-            await asyncio.to_thread(reply_message, reply_token, "已恢復 AI 自動回覆。")
+            await asyncio.to_thread(reply_text, reply_token, "已恢復 AI 自動回覆。")
             continue
 
-        # 累積訊息，保留最新的 reply_token
+        if is_human_mode(user_id):
+            continue
+
         _pending_messages.setdefault(user_id, []).append(user_msg)
         _pending_tokens[user_id] = reply_token
 
-        # 取消舊 task，重新計時
         if user_id in _pending_tasks:
             _pending_tasks[user_id].cancel()
-
-        task = asyncio.create_task(process_buffered(user_id))
-        _pending_tasks[user_id] = task
+        _pending_tasks[user_id] = asyncio.create_task(process_buffered(user_id))
 
     return {"status": "ok"}
+
+# ── Admin API ─────────────────────────────────────────────────────
+@app.get("/admin/config")
+def api_get_config(request: Request):
+    require_auth(request)
+    return _config
+
+@app.post("/admin/config")
+async def api_update_config(request: Request):
+    require_auth(request)
+    global _config
+    _config = await request.json()
+    ok = _push_config("update config via admin panel")
+    return {"ok": ok}
+
+@app.post("/admin/upload")
+async def api_upload(request: Request, file: UploadFile = File(...)):
+    require_auth(request)
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(400, "圖片不能超過 5MB")
+    url = await asyncio.to_thread(upload_image_to_github, file.filename, content)
+    return {"url": url}
+
+@app.post("/admin/reload")
+def api_reload(request: Request):
+    require_auth(request)
+    load_config()
+    return {"ok": True}
+
+# ── Admin 頁面 ────────────────────────────────────────────────────
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page():
+    return ADMIN_HTML
 
 @app.get("/")
 def root():
     return {"status": "LINE Bot is running"}
+
+
+ADMIN_HTML = r"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>新象園後台</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #111; color: #e0e0e0; min-height: 100vh; }
+.login-wrap { display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+.login-box { background: #1e1e1e; border-radius: 16px; padding: 36px; width: 320px; border: 1px solid #2a2a2a; }
+.login-box h1 { font-size: 20px; margin-bottom: 24px; color: #fff; text-align: center; }
+input, textarea, select { width: 100%; padding: 10px 14px; border: 1px solid #333; border-radius: 8px; background: #2a2a2a; color: #e0e0e0; font-size: 14px; margin-bottom: 12px; outline: none; }
+input:focus, textarea:focus, select:focus { border-color: #4ade80; }
+textarea { resize: vertical; font-family: 'Courier New', monospace; line-height: 1.5; }
+button { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: opacity .15s; }
+button:hover { opacity: .85; }
+.btn-green { background: #4ade80; color: #000; }
+.btn-red { background: #ef4444; color: #fff; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+.btn-outline { background: transparent; border: 1px solid #444; color: #ccc; }
+.btn-full { width: 100%; }
+header { background: #1a1a1a; padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #222; position: sticky; top: 0; z-index: 10; }
+header h1 { font-size: 16px; color: #fff; }
+.tabs { display: flex; background: #161616; border-bottom: 1px solid #222; }
+.tab { padding: 13px 20px; cursor: pointer; font-size: 14px; color: #777; border-bottom: 2px solid transparent; }
+.tab.active { color: #4ade80; border-bottom-color: #4ade80; }
+.container { max-width: 720px; margin: 0 auto; padding: 20px; }
+.section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.section-title { font-size: 15px; font-weight: 600; color: #fff; }
+.card { background: #1e1e1e; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; border: 1px solid #2a2a2a; }
+.card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+.tag { background: #2a2a2a; border-radius: 20px; padding: 2px 10px; font-size: 12px; color: #aaa; border: 1px solid #333; }
+.card-preview { font-size: 12px; color: #666; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.type-badge { font-size: 11px; color: #4ade80; background: #1a3a22; border-radius: 4px; padding: 1px 6px; margin-right: 6px; }
+.row { display: flex; gap: 8px; }
+.empty { text-align: center; padding: 60px 0; color: #444; }
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 50; justify-content: center; align-items: flex-start; padding: 20px; overflow-y: auto; }
+.overlay.open { display: flex; }
+.modal { background: #1e1e1e; border-radius: 14px; padding: 24px; width: 100%; max-width: 480px; margin: auto; border: 1px solid #2a2a2a; }
+.modal h2 { font-size: 16px; color: #fff; margin-bottom: 18px; }
+label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+.img-preview { max-width: 100%; border-radius: 8px; margin-top: 8px; display: none; border: 1px solid #333; }
+.upload-status { font-size: 12px; color: #888; margin-top: 4px; height: 16px; }
+.toast { position: fixed; bottom: 24px; right: 20px; padding: 10px 18px; border-radius: 8px; font-size: 13px; font-weight: 600; z-index: 200; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: 1; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="login-wrap" id="loginWrap">
+  <div class="login-box">
+    <h1>🏮 新象園後台</h1>
+    <input type="password" id="pwInput" placeholder="管理密碼" />
+    <p id="loginErr" style="color:#ef4444;font-size:12px;margin-bottom:10px;min-height:16px;"></p>
+    <button class="btn-green btn-full" onclick="doLogin()">登入</button>
+  </div>
+</div>
+
+<div id="appWrap" class="hidden">
+  <header>
+    <h1>🏮 新象園 LINE Bot 後台</h1>
+    <button class="btn-outline btn-sm" onclick="doLogout()">登出</button>
+  </header>
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('keywords')">關鍵字回覆</div>
+    <div class="tab" onclick="switchTab('info')">餐廳資料</div>
+  </div>
+
+  <div id="tab-keywords" class="container">
+    <div class="section-header">
+      <span class="section-title">關鍵字回覆規則</span>
+      <button class="btn-green btn-sm" onclick="openModal()">+ 新增規則</button>
+    </div>
+    <div id="ruleList"></div>
+    <div id="emptyMsg" class="empty hidden">尚無規則，點「新增規則」開始設定</div>
+  </div>
+
+  <div id="tab-info" class="container hidden">
+    <p class="section-title" style="margin-bottom:12px">餐廳資料（AI 回覆依據）</p>
+    <p style="font-size:12px;color:#666;margin-bottom:12px">修改後點儲存，每次儲存都會保留版本記錄</p>
+    <textarea id="restaurantInfo" rows="22"></textarea>
+    <button class="btn-green btn-full" onclick="saveInfo()">儲存餐廳資料</button>
+  </div>
+</div>
+
+<div class="overlay" id="modalOverlay" onclick="closeOverlay(event)">
+  <div class="modal">
+    <h2 id="modalTitle">新增關鍵字規則</h2>
+    <input type="hidden" id="editIdx" value="" />
+
+    <label>觸發關鍵字（逗號分隔）</label>
+    <input type="text" id="fKeywords" placeholder="菜單,menu,想看菜單" />
+
+    <label>回覆類型</label>
+    <select id="fType" onchange="updateTypeUI()">
+      <option value="text">純文字</option>
+      <option value="image">純圖片</option>
+      <option value="both">文字＋圖片</option>
+    </select>
+
+    <div id="textSection">
+      <label>回覆文字</label>
+      <textarea id="fText" rows="3" placeholder="輸入回覆內容..."></textarea>
+    </div>
+
+    <div id="imageSection" class="hidden">
+      <label>圖片（上傳或貼入 URL）</label>
+      <input type="text" id="fImageUrl" placeholder="https://..." oninput="previewUrl()" />
+      <input type="file" id="fImageFile" accept="image/*" onchange="handleUpload(event)" />
+      <div class="upload-status" id="uploadStatus"></div>
+      <img id="imgPreview" class="img-preview" />
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <button class="btn-green" style="flex:1" onclick="saveRule()">儲存規則</button>
+      <button class="btn-outline" onclick="closeModal()">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let pw = '';
+let config = { restaurant_info: '', keyword_replies: [] };
+
+// ── Auth ──────────────────────────────────────────────────────
+function doLogin() {
+  const input = document.getElementById('pwInput').value;
+  fetch('/admin/config', { headers: { 'X-Admin-Password': input } })
+    .then(r => { if (!r.ok) throw new Error('密碼錯誤'); return r.json(); })
+    .then(data => {
+      pw = input;
+      config = data;
+      document.getElementById('loginWrap').classList.add('hidden');
+      document.getElementById('appWrap').classList.remove('hidden');
+      document.getElementById('restaurantInfo').value = config.restaurant_info || '';
+      renderRules();
+    })
+    .catch(e => document.getElementById('loginErr').textContent = e.message);
+}
+document.getElementById('pwInput').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+function doLogout() {
+  pw = '';
+  document.getElementById('appWrap').classList.add('hidden');
+  document.getElementById('loginWrap').classList.remove('hidden');
+  document.getElementById('pwInput').value = '';
+}
+
+// ── Tabs ──────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', ['keywords','info'][i] === name));
+  document.getElementById('tab-keywords').classList.toggle('hidden', name !== 'keywords');
+  document.getElementById('tab-info').classList.toggle('hidden', name !== 'info');
+}
+
+// ── API ───────────────────────────────────────────────────────
+function api(path, method = 'GET', body = null) {
+  return fetch('/admin' + path, {
+    method,
+    headers: { 'X-Admin-Password': pw, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : null,
+  }).then(r => r.json());
+}
+
+// ── Rules render ──────────────────────────────────────────────
+function renderRules() {
+  const rules = config.keyword_replies || [];
+  document.getElementById('emptyMsg').classList.toggle('hidden', rules.length > 0);
+  document.getElementById('ruleList').innerHTML = rules.map((r, i) => `
+    <div class="card">
+      <div class="card-header">
+        <div class="tags">${r.keywords.map(k => `<span class="tag">${k}</span>`).join('')}</div>
+        <div class="row">
+          <button class="btn-outline btn-sm" onclick="editRule(${i})">編輯</button>
+          <button class="btn-red btn-sm" onclick="deleteRule(${i})">刪除</button>
+        </div>
+      </div>
+      <div class="card-preview">
+        <span class="type-badge">${{text:'文字',image:'圖片',both:'文字+圖片'}[r.message_type]}</span>
+        ${r.text || (r.image_url ? '📷 ' + r.image_url.split('/').pop() : '')}
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Modal ─────────────────────────────────────────────────────
+function openModal(rule = null, idx = null) {
+  document.getElementById('modalTitle').textContent = rule ? '編輯規則' : '新增規則';
+  document.getElementById('editIdx').value = idx !== null ? idx : '';
+  document.getElementById('fKeywords').value = rule ? rule.keywords.join(',') : '';
+  document.getElementById('fType').value = rule ? rule.message_type : 'text';
+  document.getElementById('fText').value = rule?.text || '';
+  document.getElementById('fImageUrl').value = rule?.image_url || '';
+  const preview = document.getElementById('imgPreview');
+  preview.style.display = rule?.image_url ? 'block' : 'none';
+  if (rule?.image_url) preview.src = rule.image_url;
+  document.getElementById('uploadStatus').textContent = '';
+  document.getElementById('fImageFile').value = '';
+  updateTypeUI();
+  document.getElementById('modalOverlay').classList.add('open');
+}
+
+function editRule(i) { openModal(config.keyword_replies[i], i); }
+
+function closeModal() { document.getElementById('modalOverlay').classList.remove('open'); }
+
+function closeOverlay(e) { if (e.target === document.getElementById('modalOverlay')) closeModal(); }
+
+function updateTypeUI() {
+  const t = document.getElementById('fType').value;
+  document.getElementById('textSection').classList.toggle('hidden', t === 'image');
+  document.getElementById('imageSection').classList.toggle('hidden', t === 'text');
+}
+
+function previewUrl() {
+  const url = document.getElementById('fImageUrl').value.trim();
+  const preview = document.getElementById('imgPreview');
+  preview.src = url;
+  preview.style.display = url ? 'block' : 'none';
+}
+
+function handleUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const status = document.getElementById('uploadStatus');
+  status.textContent = '上傳中...';
+  const form = new FormData();
+  form.append('file', file);
+  fetch('/admin/upload', { method: 'POST', headers: { 'X-Admin-Password': pw }, body: form })
+    .then(r => r.json())
+    .then(data => {
+      if (data.url) {
+        document.getElementById('fImageUrl').value = data.url;
+        const preview = document.getElementById('imgPreview');
+        preview.src = data.url;
+        preview.style.display = 'block';
+        status.textContent = '✅ 上傳成功';
+      } else {
+        status.textContent = '❌ 上傳失敗';
+      }
+    })
+    .catch(() => { status.textContent = '❌ 上傳失敗'; });
+}
+
+function saveRule() {
+  const keywords = document.getElementById('fKeywords').value.split(',').map(k => k.trim()).filter(Boolean);
+  if (!keywords.length) { alert('請輸入至少一個關鍵字'); return; }
+  const rule = {
+    id: Date.now().toString(),
+    keywords,
+    message_type: document.getElementById('fType').value,
+    text: document.getElementById('fText').value.trim(),
+    image_url: document.getElementById('fImageUrl').value.trim(),
+  };
+  const idx = document.getElementById('editIdx').value;
+  if (idx !== '') {
+    config.keyword_replies[parseInt(idx)] = rule;
+  } else {
+    config.keyword_replies.push(rule);
+  }
+  api('/config', 'POST', config).then(r => {
+    if (r.ok) { showToast('已儲存'); renderRules(); closeModal(); }
+    else showToast('儲存失敗', true);
+  });
+}
+
+function deleteRule(i) {
+  if (!confirm('確定刪除這個規則？')) return;
+  config.keyword_replies.splice(i, 1);
+  api('/config', 'POST', config).then(r => {
+    if (r.ok) { showToast('已刪除'); renderRules(); }
+    else showToast('刪除失敗', true);
+  });
+}
+
+function saveInfo() {
+  config.restaurant_info = document.getElementById('restaurantInfo').value;
+  api('/config', 'POST', config).then(r => showToast(r.ok ? '已儲存' : '儲存失敗', !r.ok));
+}
+
+// ── Toast ─────────────────────────────────────────────────────
+function showToast(msg, err = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background = err ? '#ef4444' : '#4ade80';
+  t.style.color = err ? '#fff' : '#000';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+</script>
+</body>
+</html>"""
