@@ -402,6 +402,7 @@ def api_enable_human(user_id: str, request: Request):
 def api_disable_human(user_id: str, request: Request):
     require_auth(request)
     disable_human_mode(user_id)
+    _recent_users.pop(user_id, None)
     return {"ok": True}
 
 # ── Admin 頁面 ────────────────────────────────────────────────────
