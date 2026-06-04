@@ -217,6 +217,13 @@ def find_images_in_text(text: str) -> list[str]:
                 break
     return found[:4]
 
+# ── 清理 Markdown 符號 ───────────────────────────────────────────
+def strip_markdown(text: str) -> str:
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)   # ## 標題
+    text = re.sub(r'\*{1,3}([^*]+?)\*{1,3}', r'\1', text)        # **粗體** *斜體*
+    text = re.sub(r'^\s*[*\-]\s+', '', text, flags=re.MULTILINE) # * - 列表
+    return text.strip()
+
 # ── MiniMax ───────────────────────────────────────────────────────
 def ask_minimax(user_message: str) -> str:
     try:
@@ -235,9 +242,10 @@ def ask_minimax(user_message: str) -> str:
         data = r.json()
         if data.get("choices"):
             content = data["choices"][0]["message"]["content"].strip()
-            return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return strip_markdown(content)
         if data.get("reply"):
-            return data["reply"].strip()
+            return strip_markdown(data["reply"].strip())
         print("[minimax] error:", data)
     except Exception as e:
         print("[minimax] exception:", e)
