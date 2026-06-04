@@ -36,6 +36,7 @@ _pending_tasks:    dict[str, asyncio.Task] = {}
 _human_mode:       dict[str, float]     = {}
 _rate_timestamps:  dict[str, deque]     = {}
 _rate_warned:      set[str]             = set()
+_recent_users:     dict[str, dict]      = {}   # {user_id: {last_msg, timestamp}}
 
 # ── Config ───────────────────────────────────────────────────────
 _config: dict = {"restaurant_info": "", "keyword_replies": []}
@@ -321,6 +322,8 @@ async def webhook(request: Request):
         user_msg    = event["message"]["text"].strip()
         reply_token = event["replyToken"]
 
+        _recent_users[user_id] = {"last_msg": user_msg[:60], "timestamp": time.time()}
+
         if is_rate_limited(user_id):
             if user_id not in _rate_warned:
                 _rate_warned.add(user_id)
@@ -371,6 +374,34 @@ async def api_upload(request: Request, file: UploadFile = File(...)):
 def api_reload(request: Request):
     require_auth(request)
     load_config()
+    return {"ok": True}
+
+@app.get("/admin/humans")
+def api_list_humans(request: Request):
+    require_auth(request)
+    now = time.time()
+    result = []
+    for uid, info in sorted(_recent_users.items(), key=lambda x: -x[1]["timestamp"]):
+        if now - info["timestamp"] > 86400:
+            continue
+        result.append({
+            "user_id": uid,
+            "last_msg": info["last_msg"],
+            "timestamp": info["timestamp"],
+            "human_mode": is_human_mode(uid),
+        })
+    return result
+
+@app.post("/admin/humans/{user_id}")
+def api_enable_human(user_id: str, request: Request):
+    require_auth(request)
+    enable_human_mode(user_id)
+    return {"ok": True}
+
+@app.delete("/admin/humans/{user_id}")
+def api_disable_human(user_id: str, request: Request):
+    require_auth(request)
+    disable_human_mode(user_id)
     return {"ok": True}
 
 # ── Admin 頁面 ────────────────────────────────────────────────────
@@ -452,6 +483,7 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
   <div class="tabs">
     <div class="tab active" onclick="switchTab('keywords')">關鍵字回覆</div>
     <div class="tab" onclick="switchTab('info')">餐廳資料</div>
+    <div class="tab" onclick="switchTab('humans')">接管管理</div>
   </div>
 
   <div id="tab-keywords" class="container">
@@ -468,6 +500,15 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
     <p style="font-size:12px;color:#666;margin-bottom:12px">修改後點儲存，每次儲存都會保留版本記錄</p>
     <textarea id="restaurantInfo" rows="22"></textarea>
     <button class="btn-green btn-full" onclick="saveInfo()">儲存餐廳資料</button>
+  </div>
+
+  <div id="tab-humans" class="container hidden">
+    <div class="section-header">
+      <span class="section-title">接管管理</span>
+      <button class="btn-outline btn-sm" onclick="loadHumans()">重新整理</button>
+    </div>
+    <p style="font-size:12px;color:#666;margin-bottom:16px">點「接管」後 AI 停止回覆，由你透過 LINE OA Manager 直接服務顧客。完成後點「解除接管」讓 AI 繼續。</p>
+    <div id="humanList"></div>
   </div>
 </div>
 
@@ -538,9 +579,60 @@ function doLogout() {
 
 // ── Tabs ──────────────────────────────────────────────────────
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', ['keywords','info'][i] === name));
+  const names = ['keywords','info','humans'];
+  document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', names[i] === name));
   document.getElementById('tab-keywords').classList.toggle('hidden', name !== 'keywords');
   document.getElementById('tab-info').classList.toggle('hidden', name !== 'info');
+  document.getElementById('tab-humans').classList.toggle('hidden', name !== 'humans');
+  if (name === 'humans') loadHumans();
+}
+
+// ── Humans ────────────────────────────────────────────────────
+function loadHumans() {
+  fetch('/admin/humans', { headers: { 'X-Admin-Password': pw } })
+    .then(r => r.json()).then(renderHumans);
+}
+
+function renderHumans(list) {
+  const el = document.getElementById('humanList');
+  if (!list.length) {
+    el.innerHTML = '<div class="empty">過去 24 小時內沒有對話記錄</div>';
+    return;
+  }
+  el.innerHTML = list.map(u => `
+    <div class="card">
+      <div class="card-header">
+        <div style="flex:1">
+          <div style="font-size:12px;color:#888;margin-bottom:4px">${fmtAgo(u.timestamp)}</div>
+          <div style="font-size:13px;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px">${u.last_msg}</div>
+        </div>
+        <div class="row" style="align-items:center">
+          ${u.human_mode
+            ? `<span style="color:#f59e0b;font-size:12px;margin-right:8px">人工中</span>
+               <button class="btn-green btn-sm" onclick="setHuman('${u.user_id}',false)">解除接管</button>`
+            : `<button class="btn-red btn-sm" onclick="setHuman('${u.user_id}',true)">接管</button>`
+          }
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function setHuman(userId, enable) {
+  fetch('/admin/humans/' + userId, {
+    method: enable ? 'POST' : 'DELETE',
+    headers: { 'X-Admin-Password': pw }
+  }).then(r => r.json()).then(() => {
+    showToast(enable ? '已接管，AI 暫停回覆' : '已解除，AI 恢復回覆');
+    loadHumans();
+  });
+}
+
+function fmtAgo(ts) {
+  const s = Math.floor(Date.now() / 1000 - ts);
+  if (s < 60) return s + ' 秒前';
+  if (s < 3600) return Math.floor(s / 60) + ' 分鐘前';
+  return Math.floor(s / 3600) + ' 小時前';
 }
 
 // ── API ───────────────────────────────────────────────────────
