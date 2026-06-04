@@ -19,6 +19,16 @@
       "message_type": "image",
       "text": "",
       "image_url": "https://raw.githubusercontent.com/kuangame/line-bot/main/images/IMG_3064.jpeg"
+    },
+    {
+      "id": "1780576020393",
+      "keywords": [
+        "12880",
+        "喜宴菜單"
+      ],
+      "message_type": "image",
+      "text": "",
+      "image_url": "https://raw.githubusercontent.com/kuangame/line-bot/main/images/IMG_3066.jpeg"
     }
   ]
 }
