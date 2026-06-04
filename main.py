@@ -188,23 +188,29 @@ def push_text(user_id: str, text: str):
     )
 
 # ── 關鍵字比對 ────────────────────────────────────────────────────
-def find_keyword_rule(user_msg: str) -> dict | None:
+def find_text_rule(user_msg: str) -> dict | None:
+    """找第一個有文字回覆的關鍵字規則。"""
     msg_lower = user_msg.lower()
     for rule in _config.get("keyword_replies", []):
+        if rule.get("message_type") not in ("text", "both"):
+            continue
+        if not rule.get("text"):
+            continue
         for kw in rule.get("keywords", []):
             if kw.lower() in msg_lower:
                 return rule
     return None
 
-def build_line_messages(rule: dict) -> list:
-    msgs = []
-    msg_type = rule.get("message_type", "text")
-    if msg_type in ("text", "both") and rule.get("text"):
-        msgs.append({"type": "text", "text": rule["text"]})
-    if msg_type in ("image", "both") and rule.get("image_url"):
-        url = rule["image_url"]
-        msgs.append({"type": "image", "originalContentUrl": url, "previewImageUrl": url})
-    return msgs
+def find_image_url(user_msg: str) -> str | None:
+    """找第一個有圖片的關鍵字規則，回傳圖片 URL（獨立於文字查詢）。"""
+    msg_lower = user_msg.lower()
+    for rule in _config.get("keyword_replies", []):
+        if not rule.get("image_url"):
+            continue
+        for kw in rule.get("keywords", []):
+            if kw.lower() in msg_lower:
+                return rule["image_url"]
+    return None
 
 # ── MiniMax ───────────────────────────────────────────────────────
 def ask_minimax(user_message: str) -> str:
@@ -250,35 +256,39 @@ async def process_buffered(user_id: str):
 
     combined = "\n".join(messages)
 
-    # 關鍵字優先
-    rule = find_keyword_rule(combined)
-    if rule:
-        line_msgs = build_line_messages(rule)
-        if line_msgs:
-            await asyncio.to_thread(reply_messages, reply_token, line_msgs)
+    # 文字：關鍵字優先，否則走 AI
+    text_rule = find_text_rule(combined)
+    if text_rule:
+        reply_text_content = text_rule["text"]
+    else:
+        try:
+            reply_text_content = await asyncio.to_thread(ask_minimax, combined)
+        except Exception as e:
+            print(f"[error] {e}")
+            await asyncio.to_thread(
+                reply_text, reply_token,
+                "抱歉，系統暫時無法回應，請稍後再試，或直接來電 05-2398979。"
+            )
             return
 
-    # MiniMax
-    try:
-        reply = await asyncio.to_thread(ask_minimax, combined)
-    except Exception as e:
-        print(f"[error] {e}")
-        await asyncio.to_thread(
-            reply_text, reply_token,
-            "抱歉，系統暫時無法回應，請稍後再試，或直接來電 05-2398979。"
-        )
-        return
+        HANDOFF_PHRASES = ["幫您轉交給專人", "轉交給專人處理"]
+        if any(p in reply_text_content for p in HANDOFF_PHRASES):
+            enable_human_mode(user_id)
+            if ADMIN_USER_ID:
+                asyncio.create_task(asyncio.to_thread(
+                    push_text, ADMIN_USER_ID,
+                    f"⚠️ 顧客需要真人處理\nUser ID: {user_id}\n\n對顧客傳 /done 可解除接管（2小時自動解除）"
+                ))
 
-    HANDOFF_PHRASES = ["幫您轉交給專人", "轉交給專人處理"]
-    if any(p in reply for p in HANDOFF_PHRASES):
-        enable_human_mode(user_id)
-        if ADMIN_USER_ID:
-            asyncio.create_task(asyncio.to_thread(
-                push_text, ADMIN_USER_ID,
-                f"⚠️ 顧客需要真人處理\nUser ID: {user_id}\n\n對顧客傳 /done 可解除接管（2小時自動解除）"
-            ))
+    # 圖片：獨立查詢關鍵字圖片規則，不影響文字邏輯
+    image_url = find_image_url(combined)
 
-    await asyncio.to_thread(reply_text, reply_token, reply)
+    # 組合並發送
+    line_msgs: list = [{"type": "text", "text": reply_text_content}]
+    if image_url:
+        line_msgs.append({"type": "image", "originalContentUrl": image_url, "previewImageUrl": image_url})
+
+    await asyncio.to_thread(reply_messages, reply_token, line_msgs[:5])
 
 # ── Webhook ───────────────────────────────────────────────────────
 @app.post("/webhook")
