@@ -201,16 +201,21 @@ def find_text_rule(user_msg: str) -> dict | None:
                 return rule
     return None
 
-def find_image_url(user_msg: str) -> str | None:
-    """找第一個有圖片的關鍵字規則，回傳圖片 URL（獨立於文字查詢）。"""
-    msg_lower = user_msg.lower()
+def find_images_in_text(text: str) -> list[str]:
+    """掃描任意文字，找出所有命中關鍵字的圖片 URL（去重、最多 4 張）。"""
+    text_lower = text.lower()
+    found: list[str] = []
+    seen: set[str] = set()
     for rule in _config.get("keyword_replies", []):
-        if not rule.get("image_url"):
+        url = rule.get("image_url")
+        if not url or url in seen:
             continue
         for kw in rule.get("keywords", []):
-            if kw.lower() in msg_lower:
-                return rule["image_url"]
-    return None
+            if kw.lower() in text_lower:
+                found.append(url)
+                seen.add(url)
+                break
+    return found[:4]
 
 # ── MiniMax ───────────────────────────────────────────────────────
 def ask_minimax(user_message: str) -> str:
@@ -280,13 +285,13 @@ async def process_buffered(user_id: str):
                     f"⚠️ 顧客需要真人處理\nUser ID: {user_id}\n\n對顧客傳 /done 可解除接管（2小時自動解除）"
                 ))
 
-    # 圖片：獨立查詢關鍵字圖片規則，不影響文字邏輯
-    image_url = find_image_url(combined)
+    # 圖片：掃描 AI/關鍵字的回覆文字，自動附上提到的包廂/圖片
+    image_urls = find_images_in_text(reply_text_content)
 
-    # 組合並發送
+    # 組合並發送（1 則文字 + 最多 4 張圖）
     line_msgs: list = [{"type": "text", "text": reply_text_content}]
-    if image_url:
-        line_msgs.append({"type": "image", "originalContentUrl": image_url, "previewImageUrl": image_url})
+    for url in image_urls:
+        line_msgs.append({"type": "image", "originalContentUrl": url, "previewImageUrl": url})
 
     await asyncio.to_thread(reply_messages, reply_token, line_msgs[:5])
 
