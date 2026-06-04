@@ -463,6 +463,13 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
 .toast { position: fixed; bottom: 24px; right: 20px; padding: 10px 18px; border-radius: 8px; font-size: 13px; font-weight: 600; z-index: 200; opacity: 0; transition: opacity .2s; pointer-events: none; }
 .toast.show { opacity: 1; }
 .hidden { display: none !important; }
+.acc-card { background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+.acc-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; cursor: pointer; user-select: none; }
+.acc-title-input { background: transparent; border: none; color: #fff; font-size: 14px; font-weight: 600; flex: 1; outline: none; cursor: pointer; }
+.acc-title-input:focus { color: #4ade80; cursor: text; }
+.acc-arrow { color: #666; font-size: 11px; margin-left: 8px; }
+.acc-body { display: none; padding: 0 16px 14px; }
+.acc-body.open { display: block; }
 </style>
 </head>
 <body>
@@ -490,17 +497,26 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
   <div id="tab-keywords" class="container">
     <div class="section-header">
       <span class="section-title">關鍵字回覆規則</span>
-      <button class="btn-green btn-sm" onclick="openModal()">+ 新增規則</button>
+      <div class="row" style="gap:8px">
+        <button class="btn-outline btn-sm" onclick="reloadKeywords()">重新整理</button>
+        <button class="btn-green btn-sm" onclick="openModal()">+ 新增規則</button>
+      </div>
     </div>
     <div id="ruleList"></div>
     <div id="emptyMsg" class="empty hidden">尚無規則，點「新增規則」開始設定</div>
   </div>
 
   <div id="tab-info" class="container hidden">
-    <p class="section-title" style="margin-bottom:12px">餐廳資料（AI 回覆依據）</p>
-    <p style="font-size:12px;color:#666;margin-bottom:12px">修改後點儲存，每次儲存都會保留版本記錄</p>
-    <textarea id="restaurantInfo" rows="22"></textarea>
-    <button class="btn-green btn-full" onclick="saveInfo()">儲存餐廳資料</button>
+    <div class="section-header">
+      <span class="section-title">餐廳資料（AI 回覆依據）</span>
+      <div class="row" style="gap:8px">
+        <button class="btn-outline btn-sm" onclick="reloadInfo()">重新整理</button>
+        <button class="btn-outline btn-sm" onclick="addInfoSection()">+ 新增段落</button>
+      </div>
+    </div>
+    <p style="font-size:12px;color:#666;margin-bottom:12px">點段落標題展開編輯，每次儲存保留版本記錄</p>
+    <div id="infoSections"></div>
+    <button class="btn-green btn-full" style="margin-top:8px" onclick="saveInfo()">儲存餐廳資料</button>
   </div>
 
   <div id="tab-humans" class="container hidden">
@@ -564,7 +580,7 @@ function doLogin() {
       config = data;
       document.getElementById('loginWrap').classList.add('hidden');
       document.getElementById('appWrap').classList.remove('hidden');
-      document.getElementById('restaurantInfo').value = config.restaurant_info || '';
+      renderInfoSections(config.restaurant_info || '');
       renderRules();
     })
     .catch(e => document.getElementById('loginErr').textContent = e.message);
@@ -757,8 +773,94 @@ function deleteRule(i) {
 }
 
 function saveInfo() {
-  config.restaurant_info = document.getElementById('restaurantInfo').value;
+  config.restaurant_info = collectInfoText();
   api('/config', 'POST', config).then(r => showToast(r.ok ? '已儲存' : '儲存失敗', !r.ok));
+}
+
+// ── Reload helpers ────────────────────────────────────────────
+function reloadKeywords() {
+  api('/config').then(data => { config = data; renderRules(); showToast('已重新整理'); });
+}
+function reloadInfo() {
+  api('/config').then(data => { config = data; renderInfoSections(config.restaurant_info || ''); showToast('已重新整理'); });
+}
+
+// ── Restaurant Info Accordion ─────────────────────────────────
+function renderInfoSections(text) {
+  const container = document.getElementById('infoSections');
+  const sections = [];
+  let preLines = [], current = null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('## ')) {
+      if (current === null && preLines.length)
+        sections.push({ title: '人設與指示', content: preLines.join('\n').trimEnd(), persona: true });
+      if (current !== null) sections.push(current);
+      current = { title: line.substring(3).trim(), content: '', persona: false };
+      preLines = [];
+    } else if (current === null) {
+      preLines.push(line);
+    } else {
+      current.content += line + '\n';
+    }
+  }
+  if (current !== null) sections.push(current);
+  else if (preLines.length) sections.push({ title: '人設與指示', content: preLines.join('\n').trimEnd(), persona: true });
+  sections.forEach(s => { s.content = (s.content || '').trimEnd(); });
+
+  container.innerHTML = sections.map(s => `
+    <div class="acc-card" ${s.persona ? 'data-persona="true"' : ''}>
+      <div class="acc-header" onclick="toggleSectionCard(this.parentElement)">
+        <input class="acc-title-input" value="${escHtml(s.title)}"
+               onclick="event.stopPropagation()"
+               ${s.persona ? 'readonly style="cursor:default;color:#888"' : ''} />
+        <div style="display:flex;gap:8px;align-items:center">
+          ${!s.persona ? `<button class="btn-red btn-sm" onclick="event.stopPropagation();this.closest('.acc-card').remove()">刪除</button>` : ''}
+          <span class="acc-arrow">▶</span>
+        </div>
+      </div>
+      <div class="acc-body">
+        <textarea rows="6" style="margin-bottom:0">${escHtml(s.content)}</textarea>
+      </div>
+    </div>
+  `).join('');
+}
+
+function toggleSectionCard(card) {
+  const body = card.querySelector('.acc-body');
+  const arr  = card.querySelector('.acc-arrow');
+  const open = body.classList.toggle('open');
+  arr.textContent = open ? '▼' : '▶';
+}
+
+function addInfoSection() {
+  const card = document.createElement('div');
+  card.className = 'acc-card';
+  card.innerHTML = `
+    <div class="acc-header" onclick="toggleSectionCard(this.parentElement)">
+      <input class="acc-title-input" value="新段落" onclick="event.stopPropagation()" />
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn-red btn-sm" onclick="event.stopPropagation();this.closest('.acc-card').remove()">刪除</button>
+        <span class="acc-arrow">▼</span>
+      </div>
+    </div>
+    <div class="acc-body open">
+      <textarea rows="6" style="margin-bottom:0" placeholder="輸入內容..."></textarea>
+    </div>
+  `;
+  document.getElementById('infoSections').appendChild(card);
+  card.querySelector('textarea').focus();
+}
+
+function collectInfoText() {
+  return Array.from(document.querySelectorAll('#infoSections .acc-card')).map(card => {
+    const title   = card.querySelector('.acc-title-input').value.trim();
+    const content = card.querySelector('textarea').value.trim();
+    return card.dataset.persona === 'true' ? content : `## ${title}\n${content}`;
+  }).join('\n\n');
+}
+
+function escHtml(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // ── Toast ─────────────────────────────────────────────────────
