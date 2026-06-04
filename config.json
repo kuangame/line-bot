@@ -9,6 +9,16 @@
       "message_type": "image",
       "text": "",
       "image_url": "https://raw.githubusercontent.com/kuangame/line-bot/main/images/IMG_3065.jpeg"
+    },
+    {
+      "id": "1780574264539",
+      "keywords": [
+        "大象廳",
+        "小象廳"
+      ],
+      "message_type": "image",
+      "text": "",
+      "image_url": "https://raw.githubusercontent.com/kuangame/line-bot/main/images/IMG_3064.jpeg"
     }
   ]
 }
