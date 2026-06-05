@@ -39,6 +39,15 @@
       "message_type": "image",
       "text": "",
       "image_url": "https://raw.githubusercontent.com/kuangame/line-bot/main/images/IMG_3067.jpeg"
+    },
+    {
+      "id": "1780660227756",
+      "keywords": [
+        "停車場"
+      ],
+      "message_type": "image",
+      "text": "",
+      "image_url": "https://raw.githubusercontent.com/kuangame/line-bot/main/images/IMG_3068.jpeg"
     }
   ]
 }
