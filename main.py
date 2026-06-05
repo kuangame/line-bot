@@ -17,7 +17,7 @@ app = FastAPI()
 LINE_SECRET    = os.environ.get("LINE_SECRET", "")
 LINE_TOKEN     = os.environ.get("LINE_TOKEN", "")
 MINIMAX_KEY    = os.environ.get("MINIMAX_KEY", "")
-ADMIN_USER_ID  = os.environ.get("ADMIN_USER_ID", "")
+ADMIN_USER_IDS = [i.strip() for i in os.environ.get("ADMIN_USER_ID", "").split(",") if i.strip()]
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO    = "kuangame/line-bot"
@@ -310,12 +310,11 @@ async def process_buffered(user_id: str):
         HANDOFF_PHRASES = ["幫您轉交給專人", "轉交給專人處理"]
         if any(p in reply_text_content for p in HANDOFF_PHRASES):
             enable_human_mode(user_id)
-            if ADMIN_USER_ID:
+            if ADMIN_USER_IDS:
                 name = fetch_display_name(user_id) or "顧客"
-                asyncio.create_task(asyncio.to_thread(
-                    push_text, ADMIN_USER_ID,
-                    f"⚠️ {name} 需要真人服務\n\n最後訊息：{combined[:80]}\n\n請至後台處理：\nhttps://web-production-5c2ea.up.railway.app/admin"
-                ))
+                msg = f"⚠️ {name} 需要真人服務\n\n最後訊息：{combined[:80]}\n\n請至後台處理：\nhttps://web-production-5c2ea.up.railway.app/admin"
+                for admin_id in ADMIN_USER_IDS:
+                    asyncio.create_task(asyncio.to_thread(push_text, admin_id, msg))
 
     # 圖片：掃描 AI/關鍵字的回覆文字，自動附上提到的包廂/圖片
     image_urls = find_images_in_text(reply_text_content)
