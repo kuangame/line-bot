@@ -311,9 +311,10 @@ async def process_buffered(user_id: str):
         if any(p in reply_text_content for p in HANDOFF_PHRASES):
             enable_human_mode(user_id)
             if ADMIN_USER_ID:
+                name = fetch_display_name(user_id) or "顧客"
                 asyncio.create_task(asyncio.to_thread(
                     push_text, ADMIN_USER_ID,
-                    f"⚠️ 顧客需要真人處理\nUser ID: {user_id}\n\n對顧客傳 /done 可解除接管（2小時自動解除）"
+                    f"⚠️ {name} 需要真人服務\n\n最後訊息：{combined[:80]}\n\n請至後台處理：\nhttps://web-production-5c2ea.up.railway.app/admin"
                 ))
 
     # 圖片：掃描 AI/關鍵字的回覆文字，自動附上提到的包廂/圖片
@@ -350,6 +351,10 @@ async def webhook(request: Request):
             if user_id not in _rate_warned:
                 _rate_warned.add(user_id)
                 await asyncio.to_thread(reply_text, reply_token, "您傳送訊息的速度太快，請稍後再試。")
+            continue
+
+        if user_msg == "/myid":
+            await asyncio.to_thread(reply_text, reply_token, f"你的 LINE User ID：\n{user_id}")
             continue
 
         if user_msg == DONE_KEYWORD:
