@@ -511,6 +511,22 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
 .acc-arrow { color: #666; font-size: 11px; margin-left: 8px; }
 .acc-body { display: none; padding: 0 16px 14px; }
 .acc-body.open { display: block; }
+@media (max-width: 600px) {
+  .login-box { width: calc(100% - 32px); }
+  header { padding: 12px 14px; }
+  header h1 { font-size: 13px; }
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { padding: 12px 14px; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+  .container { padding: 12px; }
+  .section-header { flex-wrap: wrap; gap: 8px; }
+  .section-header .row { flex-wrap: wrap; }
+  .card-header { flex-wrap: wrap; }
+  .btn-sm { padding: 8px 14px; font-size: 13px; }
+  .overlay { padding: 0; align-items: flex-end; }
+  .modal { border-radius: 16px 16px 0 0; max-height: 88vh; overflow-y: auto; margin: 0; }
+  input, textarea, select { font-size: 16px; }
+}
 </style>
 </head>
 <body>
