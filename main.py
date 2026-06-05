@@ -405,6 +405,47 @@ def api_disable_human(user_id: str, request: Request):
     _recent_users.pop(user_id, None)
     return {"ok": True}
 
+@app.get("/admin/versions")
+def api_list_versions(request: Request):
+    require_auth(request)
+    if not GITHUB_TOKEN:
+        return []
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/commits",
+            headers=_gh_headers(),
+            params={"path": "config.json", "per_page": 20},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return [{
+                "sha":     c["sha"],
+                "message": c["commit"]["message"],
+                "date":    c["commit"]["committer"]["date"],
+            } for c in r.json()]
+    except Exception as e:
+        print(f"[versions] {e}")
+    return []
+
+@app.post("/admin/versions/{commit_sha}/restore")
+def api_restore_version(commit_sha: str, request: Request):
+    require_auth(request)
+    global _config
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
+            headers=_gh_headers(),
+            params={"ref": commit_sha},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            _config = json.loads(base64.b64decode(r.json()["content"]).decode())
+            ok = _push_config(f"restore: revert to {commit_sha[:7]}")
+            return {"ok": ok, "config": _config}
+    except Exception as e:
+        print(f"[restore] {e}")
+    return {"ok": False}
+
 # ── Admin 頁面 ────────────────────────────────────────────────────
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page():
@@ -492,6 +533,7 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
     <div class="tab active" onclick="switchTab('keywords')">關鍵字回覆</div>
     <div class="tab" onclick="switchTab('info')">餐廳資料</div>
     <div class="tab" onclick="switchTab('humans')">接管管理</div>
+    <div class="tab" onclick="switchTab('versions')">版本記錄</div>
   </div>
 
   <div id="tab-keywords" class="container">
@@ -526,6 +568,15 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
     </div>
     <p style="font-size:12px;color:#666;margin-bottom:16px">點「接管」後 AI 停止回覆，由你透過 LINE OA Manager 直接服務顧客。完成後點「解除接管」讓 AI 繼續。</p>
     <div id="humanList"></div>
+  </div>
+
+  <div id="tab-versions" class="container hidden">
+    <div class="section-header">
+      <span class="section-title">版本記錄</span>
+      <button class="btn-outline btn-sm" onclick="loadVersions()">重新整理</button>
+    </div>
+    <p style="font-size:12px;color:#666;margin-bottom:16px">每次儲存都會產生一筆記錄，點「還原」可以回復到該版本。</p>
+    <div id="versionList"></div>
   </div>
 </div>
 
@@ -596,12 +647,13 @@ function doLogout() {
 
 // ── Tabs ──────────────────────────────────────────────────────
 function switchTab(name) {
-  const names = ['keywords','info','humans'];
+  const names = ['keywords','info','humans','versions'];
   document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', names[i] === name));
-  document.getElementById('tab-keywords').classList.toggle('hidden', name !== 'keywords');
-  document.getElementById('tab-info').classList.toggle('hidden', name !== 'info');
-  document.getElementById('tab-humans').classList.toggle('hidden', name !== 'humans');
+  ['keywords','info','humans','versions'].forEach(n =>
+    document.getElementById('tab-' + n).classList.toggle('hidden', n !== name)
+  );
   if (name === 'humans') loadHumans();
+  if (name === 'versions') loadVersions();
 }
 
 // ── Humans ────────────────────────────────────────────────────
@@ -814,7 +866,6 @@ function renderInfoSections(text) {
                onclick="event.stopPropagation()"
                ${s.persona ? 'readonly style="cursor:default;color:#888"' : ''} />
         <div style="display:flex;gap:8px;align-items:center">
-          ${!s.persona ? `<button class="btn-red btn-sm" onclick="event.stopPropagation();this.closest('.acc-card').remove()">刪除</button>` : ''}
           <span class="acc-arrow">▶</span>
         </div>
       </div>
@@ -839,7 +890,6 @@ function addInfoSection() {
     <div class="acc-header" onclick="toggleSectionCard(this.parentElement)">
       <input class="acc-title-input" value="新段落" onclick="event.stopPropagation()" />
       <div style="display:flex;gap:8px;align-items:center">
-        <button class="btn-red btn-sm" onclick="event.stopPropagation();this.closest('.acc-card').remove()">刪除</button>
         <span class="acc-arrow">▼</span>
       </div>
     </div>
@@ -861,6 +911,54 @@ function collectInfoText() {
 
 function escHtml(str) {
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Versions ──────────────────────────────────────────────────
+function loadVersions() {
+  document.getElementById('versionList').innerHTML = '<div class="empty">載入中...</div>';
+  fetch('/admin/versions', { headers: { 'X-Admin-Password': pw } })
+    .then(r => r.json()).then(renderVersions);
+}
+
+function renderVersions(list) {
+  const el = document.getElementById('versionList');
+  if (!list.length) { el.innerHTML = '<div class="empty">沒有版本記錄</div>'; return; }
+  el.innerHTML = list.map((v, i) => `
+    <div class="card">
+      <div class="card-header">
+        <div style="flex:1">
+          <div style="font-size:13px;color:#ccc">${escHtml(v.message)}</div>
+          <div style="font-size:11px;color:#555;margin-top:4px">${fmtDate(v.date)} &nbsp;·&nbsp; ${v.sha.substring(0,7)}</div>
+        </div>
+        ${i === 0
+          ? '<span style="font-size:11px;color:#4ade80;padding:0 8px">目前版本</span>'
+          : `<button class="btn-outline btn-sm" onclick="restoreVersion('${v.sha}','${escHtml(v.message)}')">還原</button>`
+        }
+      </div>
+    </div>
+  `).join('');
+}
+
+function restoreVersion(sha, msg) {
+  if (!confirm('確定還原到「' + msg + '」？目前的設定會被覆蓋。')) return;
+  fetch('/admin/versions/' + sha + '/restore', {
+    method: 'POST', headers: { 'X-Admin-Password': pw }
+  }).then(r => r.json()).then(r => {
+    if (r.ok) {
+      config = r.config;
+      renderInfoSections(config.restaurant_info || '');
+      renderRules();
+      showToast('已還原');
+      loadVersions();
+    } else {
+      showToast('還原失敗', true);
+    }
+  });
+}
+
+function fmtDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 
 // ── Toast ─────────────────────────────────────────────────────
