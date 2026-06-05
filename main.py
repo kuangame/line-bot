@@ -38,6 +38,7 @@ _rate_timestamps:  dict[str, deque]     = {}
 _rate_warned:      set[str]             = set()
 _recent_users:     dict[str, dict]      = {}   # {user_id: {last_msg, timestamp}}
 _takeover_users:   dict[str, dict]      = {}   # 被接管過的用戶（需手動刪除）
+_user_profiles:    dict[str, str]       = {}   # {user_id: display_name} 快取
 
 # ── Config ───────────────────────────────────────────────────────
 _config: dict = {"restaurant_info": "", "keyword_replies": []}
@@ -147,7 +148,9 @@ def is_human_mode(user_id: str) -> bool:
 
 def enable_human_mode(user_id: str):
     _human_mode[user_id] = time.time()
-    _takeover_users[user_id] = _recent_users.get(user_id, {"last_msg": "", "timestamp": time.time()}).copy()
+    info = _recent_users.get(user_id, {"last_msg": "", "timestamp": time.time()}).copy()
+    info["display_name"] = fetch_display_name(user_id)
+    _takeover_users[user_id] = info
     print(f"[human] {user_id} 進入人工模式")
 
 def disable_human_mode(user_id: str):
@@ -170,6 +173,23 @@ def is_rate_limited(user_id: str) -> bool:
 def verify_signature(body: bytes, signature: str) -> bool:
     mac = hmac.new(LINE_SECRET.encode(), body, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(mac).decode(), signature)
+
+def fetch_display_name(user_id: str) -> str:
+    if user_id in _user_profiles:
+        return _user_profiles[user_id]
+    try:
+        r = requests.get(
+            f"https://api.line.me/v2/bot/profile/{user_id}",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            name = r.json().get("displayName", "")
+            _user_profiles[user_id] = name
+            return name
+    except Exception as e:
+        print(f"[profile] {e}")
+    return ""
 
 def reply_messages(reply_token: str, messages: list):
     requests.post(
@@ -383,10 +403,11 @@ def api_list_humans(request: Request):
     require_auth(request)
     return [
         {
-            "user_id": uid,
-            "last_msg": info["last_msg"],
-            "timestamp": info["timestamp"],
-            "human_mode": is_human_mode(uid),
+            "user_id":      uid,
+            "display_name": info.get("display_name", ""),
+            "last_msg":     info["last_msg"],
+            "timestamp":    info["timestamp"],
+            "human_mode":   is_human_mode(uid),
         }
         for uid, info in sorted(_takeover_users.items(), key=lambda x: -x[1]["timestamp"])
     ]
@@ -691,8 +712,9 @@ function renderHumans(list) {
     <div class="card">
       <div class="card-header">
         <div style="flex:1">
-          <div style="font-size:12px;color:#888;margin-bottom:4px">${fmtAgo(u.timestamp)}</div>
-          <div style="font-size:13px;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px">${u.last_msg}</div>
+          <div style="font-size:12px;color:#888;margin-bottom:2px">${fmtAgo(u.timestamp)}</div>
+          ${u.display_name ? `<div style="font-size:14px;color:#fff;font-weight:600;margin-bottom:2px">${u.display_name}</div>` : ''}
+          <div style="font-size:12px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px">${u.last_msg}</div>
         </div>
         <div class="row" style="align-items:center;gap:6px">
           ${u.human_mode
