@@ -203,12 +203,14 @@ def reply_text(reply_token: str, text: str):
     reply_messages(reply_token, [{"type": "text", "text": text}])
 
 def push_text(user_id: str, text: str):
-    requests.post(
+    resp = requests.post(
         "https://api.line.me/v2/bot/message/push",
         headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
         json={"to": user_id, "messages": [{"type": "text", "text": text}]},
         timeout=10,
     )
+    if not resp.ok:
+        print(f"[push_text ERROR] user={user_id} status={resp.status_code} body={resp.text}")
 
 # ── 關鍵字比對 ────────────────────────────────────────────────────
 def find_text_rule(user_msg: str) -> dict | None:
@@ -401,6 +403,15 @@ def api_reload(request: Request):
     require_auth(request)
     load_config()
     return {"ok": True}
+
+@app.post("/admin/test-notify")
+def api_test_notify(request: Request):
+    require_auth(request)
+    if not ADMIN_USER_IDS:
+        return {"ok": False, "error": "ADMIN_USER_ID 環境變數未設定"}
+    for admin_id in ADMIN_USER_IDS:
+        push_text(admin_id, "✅ 通知測試成功！LINE Bot 管理員通知正常運作。")
+    return {"ok": True, "sent_to": ADMIN_USER_IDS}
 
 @app.get("/admin/humans")
 def api_list_humans(request: Request):
