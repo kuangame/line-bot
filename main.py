@@ -37,6 +37,7 @@ _human_mode:       dict[str, float]     = {}
 _rate_timestamps:  dict[str, deque]     = {}
 _rate_warned:      set[str]             = set()
 _recent_users:     dict[str, dict]      = {}   # {user_id: {last_msg, timestamp}}
+_takeover_users:   dict[str, dict]      = {}   # 被接管過的用戶（需手動刪除）
 
 # ── Config ───────────────────────────────────────────────────────
 _config: dict = {"restaurant_info": "", "keyword_replies": []}
@@ -146,6 +147,7 @@ def is_human_mode(user_id: str) -> bool:
 
 def enable_human_mode(user_id: str):
     _human_mode[user_id] = time.time()
+    _takeover_users[user_id] = _recent_users.get(user_id, {"last_msg": "", "timestamp": time.time()}).copy()
     print(f"[human] {user_id} 進入人工模式")
 
 def disable_human_mode(user_id: str):
@@ -379,18 +381,15 @@ def api_reload(request: Request):
 @app.get("/admin/humans")
 def api_list_humans(request: Request):
     require_auth(request)
-    now = time.time()
-    result = []
-    for uid, info in sorted(_recent_users.items(), key=lambda x: -x[1]["timestamp"]):
-        if now - info["timestamp"] > 86400:
-            continue
-        result.append({
+    return [
+        {
             "user_id": uid,
             "last_msg": info["last_msg"],
             "timestamp": info["timestamp"],
             "human_mode": is_human_mode(uid),
-        })
-    return result
+        }
+        for uid, info in sorted(_takeover_users.items(), key=lambda x: -x[1]["timestamp"])
+    ]
 
 @app.post("/admin/humans/{user_id}")
 def api_enable_human(user_id: str, request: Request):
@@ -402,6 +401,13 @@ def api_enable_human(user_id: str, request: Request):
 def api_disable_human(user_id: str, request: Request):
     require_auth(request)
     disable_human_mode(user_id)
+    return {"ok": True}
+
+@app.delete("/admin/humans/{user_id}/remove")
+def api_remove_human(user_id: str, request: Request):
+    require_auth(request)
+    disable_human_mode(user_id)
+    _takeover_users.pop(user_id, None)
     _recent_users.pop(user_id, None)
     return {"ok": True}
 
@@ -680,23 +686,22 @@ function loadHumans() {
 
 function renderHumans(list) {
   const el = document.getElementById('humanList');
-  if (!list.length) {
-    el.innerHTML = '<div class="empty">過去 24 小時內沒有對話記錄</div>';
-    return;
-  }
+  if (!list.length) { el.innerHTML = '<div class="empty">目前沒有接管記錄</div>'; return; }
   el.innerHTML = list.map(u => `
     <div class="card">
       <div class="card-header">
         <div style="flex:1">
           <div style="font-size:12px;color:#888;margin-bottom:4px">${fmtAgo(u.timestamp)}</div>
-          <div style="font-size:13px;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px">${u.last_msg}</div>
+          <div style="font-size:13px;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px">${u.last_msg}</div>
         </div>
-        <div class="row" style="align-items:center">
+        <div class="row" style="align-items:center;gap:6px">
           ${u.human_mode
-            ? `<span style="color:#f59e0b;font-size:12px;margin-right:8px">人工中</span>
-               <button class="btn-green btn-sm" onclick="setHuman('${u.user_id}',false)">解除接管</button>`
-            : `<button class="btn-red btn-sm" onclick="setHuman('${u.user_id}',true)">接管</button>`
+            ? `<span style="color:#f59e0b;font-size:12px">人工中</span>
+               <button class="btn-green btn-sm" onclick="setHuman('${u.user_id}',false)">解除</button>`
+            : `<span style="color:#4ade80;font-size:12px">已解除</span>
+               <button class="btn-outline btn-sm" onclick="setHuman('${u.user_id}',true)">接管</button>`
           }
+          <button class="btn-red btn-sm" onclick="removeHuman('${u.user_id}')">刪除</button>
         </div>
       </div>
     </div>
@@ -709,6 +714,17 @@ function setHuman(userId, enable) {
     headers: { 'X-Admin-Password': pw }
   }).then(r => r.json()).then(() => {
     showToast(enable ? '已接管，AI 暫停回覆' : '已解除，AI 恢復回覆');
+    loadHumans();
+  });
+}
+
+function removeHuman(userId) {
+  if (!confirm('確定刪除這筆接管記錄？')) return;
+  fetch('/admin/humans/' + userId + '/remove', {
+    method: 'DELETE',
+    headers: { 'X-Admin-Password': pw }
+  }).then(r => r.json()).then(() => {
+    showToast('已刪除');
     loadHumans();
   });
 }
