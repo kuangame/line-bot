@@ -513,6 +513,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 input, textarea, select { width: 100%; padding: 10px 14px; border: 1px solid #333; border-radius: 8px; background: #2a2a2a; color: #e0e0e0; font-size: 14px; margin-bottom: 12px; outline: none; }
 input:focus, textarea:focus, select:focus { border-color: #4ade80; }
 textarea { resize: vertical; font-family: 'Courier New', monospace; line-height: 1.5; }
+.acc-body textarea { min-height: 200px; }
 button { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: opacity .15s; }
 button:hover { opacity: .85; }
 .btn-green { background: #4ade80; color: #000; }
@@ -941,7 +942,7 @@ function renderInfoSections(text) {
         </div>
       </div>
       <div class="acc-body">
-        <textarea rows="6" style="margin-bottom:0">${escHtml(s.content)}</textarea>
+        <textarea rows="12" style="margin-bottom:0">${escHtml(s.content)}</textarea>
       </div>
     </div>
   `).join('');
@@ -992,7 +993,7 @@ function addInfoSection() {
       </div>
     </div>
     <div class="acc-body open">
-      <textarea rows="6" style="margin-bottom:0" placeholder="輸入內容..."></textarea>
+      <textarea rows="12" style="margin-bottom:0" placeholder="輸入內容..."></textarea>
     </div>
   `;
   document.getElementById('infoSections').appendChild(card);
