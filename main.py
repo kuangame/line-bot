@@ -548,8 +548,10 @@ label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
 .hidden { display: none !important; }
 .acc-card { background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
 .acc-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; cursor: pointer; user-select: none; }
-.acc-title-input { background: transparent; border: none; color: #fff; font-size: 14px; font-weight: 600; flex: 1; outline: none; cursor: pointer; }
-.acc-title-input:focus { color: #4ade80; cursor: text; }
+.acc-title-text { color: #fff; font-size: 14px; font-weight: 600; flex: 1; }
+.acc-title-input { background: #2a2a2a; border: 1px solid #4ade80; border-radius: 4px; color: #4ade80; font-size: 14px; font-weight: 600; flex: 1; outline: none; padding: 2px 6px; display: none; }
+.acc-edit-btn { background: none; border: none; color: #666; cursor: pointer; font-size: 12px; padding: 2px 4px; margin-left: 6px; border-radius: 4px; }
+.acc-edit-btn:hover { color: #4ade80; background: #2a2a2a; }
 .acc-arrow { color: #666; font-size: 11px; margin-left: 8px; }
 .acc-body { display: none; padding: 0 16px 14px; }
 .acc-body.open { display: block; }
@@ -931,9 +933,9 @@ function renderInfoSections(text) {
   container.innerHTML = sections.map(s => `
     <div class="acc-card" ${s.persona ? 'data-persona="true"' : ''}>
       <div class="acc-header" onclick="toggleSectionCard(this.parentElement)">
-        <input class="acc-title-input" value="${escHtml(s.title)}"
-               onclick="event.stopPropagation()"
-               ${s.persona ? 'readonly style="cursor:default;color:#888"' : ''} />
+        <span class="acc-title-text" ${s.persona ? 'style="color:#888"' : ''}>${escHtml(s.title)}</span>
+        <input class="acc-title-input" value="${escHtml(s.title)}" />
+        ${s.persona ? '' : '<button class="acc-edit-btn" onclick="startEditTitle(this,event)" title="編輯標題">✏</button>'}
         <div style="display:flex;gap:8px;align-items:center">
           <span class="acc-arrow">▶</span>
         </div>
@@ -943,6 +945,31 @@ function renderInfoSections(text) {
       </div>
     </div>
   `).join('');
+}
+
+function startEditTitle(btn, event) {
+  event.stopPropagation();
+  const header = btn.closest('.acc-header');
+  const span   = header.querySelector('.acc-title-text');
+  const input  = header.querySelector('.acc-title-input');
+  span.style.display  = 'none';
+  btn.style.display   = 'none';
+  input.style.display = 'block';
+  input.focus();
+  input.select();
+  function finish() {
+    const val = input.value.trim() || span.textContent;
+    input.value         = val;
+    span.textContent    = val;
+    span.style.display  = '';
+    btn.style.display   = '';
+    input.style.display = 'none';
+    input.removeEventListener('blur',   finish);
+    input.removeEventListener('keydown', onKey);
+  }
+  function onKey(e) { if (e.key === 'Enter' || e.key === 'Escape') finish(); }
+  input.addEventListener('blur',    finish);
+  input.addEventListener('keydown', onKey);
 }
 
 function toggleSectionCard(card) {
@@ -957,7 +984,9 @@ function addInfoSection() {
   card.className = 'acc-card';
   card.innerHTML = `
     <div class="acc-header" onclick="toggleSectionCard(this.parentElement)">
-      <input class="acc-title-input" value="新段落" onclick="event.stopPropagation()" />
+      <span class="acc-title-text">新段落</span>
+      <input class="acc-title-input" value="新段落" />
+      <button class="acc-edit-btn" onclick="startEditTitle(this,event)" title="編輯標題">✏</button>
       <div style="display:flex;gap:8px;align-items:center">
         <span class="acc-arrow">▼</span>
       </div>
@@ -972,7 +1001,8 @@ function addInfoSection() {
 
 function collectInfoText() {
   return Array.from(document.querySelectorAll('#infoSections .acc-card')).map(card => {
-    const title   = card.querySelector('.acc-title-input').value.trim();
+    const titleEl = card.querySelector('.acc-title-input');
+    const title   = titleEl ? titleEl.value.trim() : '';
     const content = card.querySelector('textarea').value.trim();
     return card.dataset.persona === 'true' ? content : `## ${title}\n${content}`;
   }).join('\n\n');
